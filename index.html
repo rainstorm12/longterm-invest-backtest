@@ -163,8 +163,8 @@ const ENGINE = (function () {
   const INIT = 50000.0, THRESH = 0.03, STOPDD = 0.28, MA_WIN = 200;
   const FEE_RATE = 0.0001, FEE_MIN = 0.1;
   const ETF = [
-    { secid: "1.513500", code: "513500" },
-    { secid: "1.515180", code: "515180" }
+    { secid: "1.513500", code: "513500", tx: "sh513500" },
+    { secid: "1.515180", code: "515180", tx: "sh515180" }
   ];
   const BENCH = [
     { secid: "1.000001", label: "上证指数" },
@@ -208,20 +208,58 @@ const ENGINE = (function () {
     });
   }
 
-  // 带退避重试（东财 JSONP 偶发断连，关键数据必须重试）
+  // 东财带退避重试
   async function fetchKlineRetry(secid, times) {
     let last;
-    for (let i = 0; i < (times || 3); i++) {
+    for (let i = 0; i < (times || 2); i++) {
       try { return await fetchKline(secid); }
-      catch (e) { last = e; if (i < (times || 3) - 1) await new Promise(r => setTimeout(r, 400 * (i + 1))); }
+      catch (e) { last = e; if (i < (times || 2) - 1) await new Promise(r => setTimeout(r, 400 * (i + 1))); }
     }
     throw last;
+  }
+
+  // 腾讯源兜底：_var=变量名 返回「变量名={json}」赋值语句，脚本加载后从全局变量读数据
+  // 数据结构 data[sym].qfqday = [[date,open,close,high,low,volume],...]
+  function fetchKlineTx(txSym, timeout) {
+    return new Promise((resolve, reject) => {
+      const cb = "_txvar_" + Math.random().toString(36).slice(2, 10);
+      const s = document.createElement("script");
+      const url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=" + txSym +
+        ",day,,,3000,qfq&_var=" + cb;
+      let done = false;
+      const finish = (ok, val) => {
+        if (done) return; done = true;
+        clearTimeout(timer); try { delete window[cb]; } catch (e) {} s.remove();
+        ok ? resolve(val) : reject(val);
+      };
+      const timer = setTimeout(() => finish(false, new Error("tx-timeout " + txSym)), timeout || 12000);
+      s.onload = () => {
+        try {
+          const d = window[cb];               // 腾讯把数据对象赋给这个全局变量
+          const node = d && d.data && d.data[txSym];
+          const kl = node && (node.qfqday || node.day);
+          if (!kl || !kl.length) return finish(false, new Error("tx-no-data " + txSym));
+          const out = {};
+          for (const row of kl) out[row[0]] = parseFloat(row[2]); // close 在索引2
+          finish(true, { name: node.name || txSym, series: out });
+        } catch (e) { finish(false, e); }
+      };
+      s.onerror = () => finish(false, new Error("tx-network " + txSym));
+      s.src = url;
+      document.head.appendChild(s);
+    });
+  }
+
+  // 关键数据：东财重试 -> 腾讯兜底，两条腿走路
+  async function fetchEtfWithFallback(item) {
+    try { return await fetchKlineRetry(item.secid, 2); }
+    catch (e) { return await fetchKlineTx(item.tx); }
   }
 
   // 并发拉取所有标的
   async function fetchAll() {
     const jobs = [
-      ...ETF.map(e => fetchKlineRetry(e.secid, 3).then(r => ({ kind: "etf", code: e.code, ...r }))),
+      ...ETF.map(e => fetchEtfWithFallback(e).then(r => ({ kind: "etf", code: e.code, ...r }))),
       ...BENCH.map(b => fetchKlineRetry(b.secid, 2).then(r => ({ kind: "bench", label: b.label, ...r }))
                             .catch(() => null))
     ];
