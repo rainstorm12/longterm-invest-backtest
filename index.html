@@ -208,11 +208,21 @@ const ENGINE = (function () {
     });
   }
 
+  // 带退避重试（东财 JSONP 偶发断连，关键数据必须重试）
+  async function fetchKlineRetry(secid, times) {
+    let last;
+    for (let i = 0; i < (times || 3); i++) {
+      try { return await fetchKline(secid); }
+      catch (e) { last = e; if (i < (times || 3) - 1) await new Promise(r => setTimeout(r, 400 * (i + 1))); }
+    }
+    throw last;
+  }
+
   // 并发拉取所有标的
   async function fetchAll() {
     const jobs = [
-      ...ETF.map(e => fetchKline(e.secid).then(r => ({ kind: "etf", code: e.code, ...r }))),
-      ...BENCH.map(b => fetchKline(b.secid).then(r => ({ kind: "bench", label: b.label, ...r }))
+      ...ETF.map(e => fetchKlineRetry(e.secid, 3).then(r => ({ kind: "etf", code: e.code, ...r }))),
+      ...BENCH.map(b => fetchKlineRetry(b.secid, 2).then(r => ({ kind: "bench", label: b.label, ...r }))
                             .catch(() => null))
     ];
     const res = await Promise.all(jobs);
