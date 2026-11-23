@@ -138,7 +138,7 @@ tr:hover td{background:#1d2128}
     <div class="rtgrid">
       <div class="rtitem"><div class="nm" id="rtSpyName">标普500ETF 513500</div><div class="pr" id="rtSpyPrice">—</div><div class="cg" id="rtSpyChg">—</div></div>
       <div class="rtitem"><div class="nm" id="rtDivName">红利ETF 515180</div><div class="pr" id="rtDivPrice">—</div><div class="cg" id="rtDivChg">—</div></div>
-      <div class="rtitem port"><div class="nm">组合实时估值（当前持仓）</div><div class="pr" id="rtPortVal">—</div><div class="cg" id="rtPortChg">—</div></div>
+      <div class="rtitem port"><div class="nm">组合实时估值 · 总收益</div><div class="pr" id="rtPortVal">—</div><div class="cg" id="rtPortChg">—</div></div>
     </div>
     <div class="rthint" id="rtHint">—</div>
   </div>
@@ -715,33 +715,42 @@ function renderRealtime(rt){
   const spy=rt.quotes['513500'], div=rt.quotes['515180'];
   document.getElementById('rtSpyName').textContent=(spy?.name||'标普500ETF')+' 513500';
   document.getElementById('rtDivName').textContent=(div?.name||'红利ETF')+' 515180';
-  document.getElementById('rtSpyPrice').textContent=spy?spy.price.toFixed(3):'—';
-  document.getElementById('rtDivPrice').textContent=div?div.price.toFixed(3):'—';
+  const px0 = q => (q && Number.isFinite(q.price) && q.price>0) ? q.price.toFixed(3) : '—';
+  document.getElementById('rtSpyPrice').textContent=px0(spy);
+  document.getElementById('rtDivPrice').textContent=px0(div);
   const spyEl=document.getElementById('rtSpyChg'), divEl=document.getElementById('rtDivChg');
   if(spy){spyEl.textContent=f2(spy.chg);spyEl.className='cg '+cls(spy.chg);}
   if(div){divEl.textContent=f2(div.chg);divEl.className='cg '+cls(div.chg);}
 
-  // 组合实时估值：末日持仓份额 × 实时价 + 现金；无持仓数据则按末日净值近似
-  let portVal, portChg, prevVal;
+  // 组合实时估值：末日持仓份额 × 实时价 + 现金；实时价无效(0/缺失)时回退昨收，杜绝算出 0
+  let portVal, dayChg;
   const m=M;
-  if(m.last_in_market && m.last_qa!=null && spy && div){
-    portVal  = m.last_qa*spy.price      + m.last_qb*div.price      + m.last_cash;
-    prevVal  = m.last_qa*(m.last_spy_close||spy.prev) + m.last_qb*(m.last_div_close||div.prev) + m.last_cash;
+  const px = (q, fallback) => (q && Number.isFinite(q.price) && q.price>0) ? q.price : (q && Number.isFinite(q.prev) && q.prev>0 ? q.prev : null);
+  const pSpy = px(spy), pDiv = px(div);
+  if(m.last_in_market && m.last_qa!=null && pSpy && pDiv){
+    portVal = m.last_qa*pSpy + m.last_qb*pDiv + m.last_cash;
+    const base = m.last_qa*(m.last_spy_close||spy.prev) + m.last_qb*(m.last_div_close||div.prev) + m.last_cash;
+    dayChg = base ? portVal/base-1 : 0;
   }else if(m.last_in_market===false){
-    portVal = prevVal = (m.last_cash!=null?m.last_cash:m.final);
+    portVal = (m.last_cash!=null?m.last_cash:m.final);
+    dayChg = 0;
   }else{
-    // 内嵌旧数据：按末日净值 + 当日加权涨跌近似
-    const w=(spy&&div)?(spy.chg+div.chg)/2:0;
-    portVal=m.final*(1+w); prevVal=m.final;
+    // 内嵌旧数据无持仓字段：按末日净值 + 当日加权涨跌近似
+    // 注意 chg 是「百分比数值」(-0.77 表示 -0.77%)，当比例用须 ÷100
+    const w=(spy&&div)?(spy.chg+div.chg)/2/100:0;
+    portVal=m.final*(1+w); dayChg=w;
   }
-  portChg = prevVal? portVal/prevVal-1 : 0;
+  // 兜底：任何异常都退回末日净值，绝不让卡片显示 ¥0
+  if(!Number.isFinite(portVal) || portVal<=0){ portVal=m.final; dayChg=0; }
+  // 主数字显示「相对本金的总收益」——用户真正关心的赚了多少，而非当日 0.00%
+  const totalChg = portVal/m.init - 1;
   document.getElementById('rtPortVal').textContent=money(portVal);
   document.getElementById('rtPortVal').className='pr '+cls(portVal-m.init);
   const portChgEl=document.getElementById('rtPortChg');
-  portChgEl.textContent=f2(portChg*100);
-  portChgEl.className='cg '+cls(portChg);
+  portChgEl.textContent=f2(totalChg*100);
+  portChgEl.className='cg '+cls(totalChg);
   document.getElementById('rtHint').textContent=
-    st.label+' · 行情时间 '+st.quoteDate+' · '+st.hint+' · 组合估值按当前持仓份额×最新价计算，非交易价格';
+    st.label+' · 行情时间 '+st.quoteDate+' · '+st.hint+' · 涨跌幅为相对本金总收益，当日变动 '+f2(dayChg*100)+' · 估值按持仓份额×最新价计算，非交易价格';
 }
 
 // 首次渲染（用内嵌数据秒开）
